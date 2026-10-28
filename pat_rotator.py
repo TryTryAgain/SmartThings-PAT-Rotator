@@ -46,6 +46,58 @@ logging.basicConfig(
 )
 log = logging.getLogger("pat_rotator")
 
+# net::ERR_NETWORK_CHANGED (interface/route changed mid-request) is a
+# transient OS-level network condition, not a page/selector problem -
+# retrying the same navigation almost always succeeds a few seconds later.
+NETWORK_CHANGED_RETRY_ATTEMPTS = 3
+NETWORK_CHANGED_RETRY_DELAY_SECONDS = 5
+
+
+async def goto_with_retry(page, url: str, **kwargs) -> None:
+    """page.goto() that retries on a transient network-changed error.
+
+    A network change mid-redirect (e.g. SmartThings -> Samsung's OAuth
+    authorize URL) doesn't always make page.goto() itself raise - Playwright
+    can let the navigation "complete" by landing on Chrome's own internal
+    chrome-error://chromewebdata/ page instead. Confirmed directly: a run
+    logged "Landed at: chrome-error://chromewebdata/" immediately *after*
+    this function returned normally, with no exception ever thrown, even
+    though the browser-level log showed ERR_NETWORK_CHANGED on that exact
+    redirect hop moments earlier. So both a thrown exception AND a
+    chrome-error:// landing need to trigger a retry - checking the
+    exception alone missed this case entirely.
+    """
+    for attempt in range(1, NETWORK_CHANGED_RETRY_ATTEMPTS + 1):
+        last_attempt = attempt == NETWORK_CHANGED_RETRY_ATTEMPTS
+        try:
+            await page.goto(url, **kwargs)
+        except Exception as e:
+            if "ERR_NETWORK_CHANGED" not in str(e) or last_attempt:
+                raise
+            log.warning(
+                "Network changed navigating to %s (attempt %s/%s) - retrying in %ss",
+                url, attempt, NETWORK_CHANGED_RETRY_ATTEMPTS, NETWORK_CHANGED_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(NETWORK_CHANGED_RETRY_DELAY_SECONDS)
+            continue
+
+        if page.url.startswith("chrome-error://"):
+            if last_attempt:
+                raise RuntimeError(
+                    f"Navigation to {url} landed on a browser error page "
+                    f"({page.url}) after {NETWORK_CHANGED_RETRY_ATTEMPTS} attempts"
+                )
+            log.warning(
+                "Landed on a browser error page (%s) navigating to %s "
+                "(attempt %s/%s) - retrying in %ss",
+                page.url, url, attempt, NETWORK_CHANGED_RETRY_ATTEMPTS, NETWORK_CHANGED_RETRY_DELAY_SECONDS,
+            )
+            await asyncio.sleep(NETWORK_CHANGED_RETRY_DELAY_SECONDS)
+            continue
+
+        return
+
+
 # ---------------------------------------------------------------------------
 # Login helpers
 # ---------------------------------------------------------------------------
@@ -184,6 +236,11 @@ async def generate_new_pat(page) -> tuple[str, str]:
     """Click 'Generate new token', fill in the form, and return the raw token string and its label."""
 
     # --- Find the Generate button ---
+    # The tokens page can still be rendering its token list (a loading
+    # spinner) when we arrive - page.goto()'s "networkidle" only means no
+    # network activity, not that the SPA has finished its own client-side
+    # render. 5s per selector wasn't enough on a slow render; 15s costs
+    # nothing against a 20h rotation cadence.
     gen_btn = None
     for sel in [
         "button:has-text('Generate new token')",
@@ -192,7 +249,7 @@ async def generate_new_pat(page) -> tuple[str, str]:
         "button:has-text('New token')",
     ]:
         try:
-            await page.wait_for_selector(sel, timeout=5_000)
+            await page.wait_for_selector(sel, timeout=15_000)
             gen_btn = page.locator(sel).first
             if await gen_btn.is_visible():
                 break
@@ -610,13 +667,13 @@ async def run_browser(debug: bool = False) -> str:
 
         try:
             log.info(f"Navigating to {PAT_PAGE_URL}")
-            await page.goto(PAT_PAGE_URL, wait_until="networkidle", timeout=30_000)
+            await goto_with_retry(page, PAT_PAGE_URL, wait_until="networkidle", timeout=30_000)
             log.info(f"Landed at: {page.url}")
 
             # If we were redirected to a login page, authenticate first
             if "account.smartthings.com/tokens" not in page.url:
                 await do_login(page)
-                await page.goto(PAT_PAGE_URL, wait_until="networkidle", timeout=20_000)
+                await goto_with_retry(page, PAT_PAGE_URL, wait_until="networkidle", timeout=20_000)
 
             token, pat_label = await generate_new_pat(page)
 

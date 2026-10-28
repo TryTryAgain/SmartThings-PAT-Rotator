@@ -34,23 +34,24 @@ endpoints through their documented OAuth-capable API.**
 ```
 ┌──────────────────────────────────────────────────────────┐
 │                       Docker stack                       │
-│                                                           │
+│                                                          │
 │  ┌──────────────────┐  every 20 h   ┌───────────────┐    │
 │  │   pat-rotator    │──────────────▶│  Playwright   │    │
 │  │  (supercronic)   │               │  Chromium     │    │
 │  └────────┬─────────┘               └───────┬───────┘    │
-│           │  POST /api/services/             │            │
-│           │  input_text/set_value           PAT           │
-│           │  new token                       │            │
+│           │  POST /api/services/            ▲            │
+│           │  input_text/set_value          PAT           │
+│           │  new token                      │            │
 └───────────┼─────────────────────────────────┘────────────┘
+            │
             ▼
-  ┌─────────────────────────────────────────┐
+  ┌────────────────────────────────────────-─┐
   │  Home Assistant                          │
   │                                          │
   │  input_text.smartthings_pat  ◀── write   │
   │         │                                │
   │  samsung_familyhub_fridge api.py         │
-  │  (reads token on every 10-s poll)  ◀─── │
+  │  (reads token on every 10-s poll)  ◀───  │
   └──────────────────────────────────────────┘
 ```
 
